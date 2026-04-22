@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Produce the 3 key figures from results/summary.csv:
+Produce the 4 key figures from results/summary.csv:
     figures/throughput.png          - tokens/sec/GPU per config
     figures/memory.png              - peak memory per config
     figures/scaling_efficiency.png  - scaling eff vs single-GPU baseline
+    figures/mfu.png                 - Model FLOP Utilization per config
 """
 
 from pathlib import Path
@@ -99,12 +100,30 @@ def plot_scaling(df):
     print(f"Wrote {FIGURES_DIR / 'scaling_efficiency.png'}")
 
 
+def plot_mfu(df):
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.bar(df["label"], df["mfu_pct"], color="mediumpurple")
+    ax.set_ylabel("MFU (%)")
+    ax.set_title("Model FLOP Utilization by parallelism strategy")
+    ax.set_xticks(range(len(df)))
+    ax.set_xticklabels(df["label"], rotation=30, ha="right")
+    for i, v in enumerate(df["mfu_pct"]):
+        ax.text(i, v, f"{v:.1f}%", ha="center", va="bottom", fontsize=9)
+    ax.set_ylim(0, max(50, df["mfu_pct"].max() * 1.15))
+    ax.grid(axis="y", alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(FIGURES_DIR / "mfu.png", dpi=150)
+    plt.close()
+    print(f"Wrote {FIGURES_DIR / 'mfu.png'}")
+
+
 def main():
     FIGURES_DIR.mkdir(exist_ok=True)
     df = load()
     plot_throughput(df)
     plot_memory(df)
     plot_scaling(df)
+    plot_mfu(df)
 
 
 if __name__ == "__main__":
