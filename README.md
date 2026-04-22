@@ -1,5 +1,3 @@
-# distributed-pretraining-llm
-
 # Distributed Pretraining LLM: Parallelism Strategies Benchmark
 
 This repository benchmarks various distributed training strategies (DDP, FSDP, Tensor Parallelism) for pretraining a small LLM (Llama 3 1.4B) across an 8-GPU node.
@@ -13,6 +11,31 @@ This repository benchmarks various distributed training strategies (DDP, FSDP, T
 - **Data:** c4_test (2K samples) - systems bench only
 - **Configs:** 7 parallelism strategies, identical except for [parallelism] section and local_batch_size (adjusted so global batch stays at 16)
 - **Metrics:** Tokens/sec/GPU, peak memory, Model Flop Utilization (MFU), scaling efficiency. (Warmup: 50 steps discarded; measured over steps 50-550)
+
+## Repository layout and code
+
+Training is not implemented in this repo from scratch. **This repo configures [torchtitan](https://github.com/pytorch/torchtitan), patches it for CSV logging and a small Llama3 flavor, runs several TOML jobs, and analyzes the logs.**
+
+| Path                                      | What it does                                                                                                                                                                                                                                                                                                                        |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `setup.sh`                                | Creates a Python 3.11 `venv/`, clones `torchtitan/` at a **pinned commit** (`TORCHTITAN_COMMIT` in the script), applies `patches/csv_logging_and_1b_flavor.patch`, installs torchtitan (editable) and this repo’s `requirements.txt`. Run once on a fresh machine.                                                                  |
+| `patches/csv_logging_and_1b_flavor.patch` | Adds a **1B-scale** Llama3 `TransformerModelArgs` entry and **per-step CSV logging** in torchtitan’s trainer. When the env var **`CSV_OUTPUT`** is set, rank 0 writes one row per step: `step`, `step_time_s`, `tokens_this_step`, `peak_mem_gb`, `loss`.                                                                           |
+| `configs/*.toml`                          | One file per parallelism strategy. Sections match torchtitan’s job config: `[model]`, `[training]`, `[parallelism]`, etc. Only **`[parallelism]`** and **`training.local_batch_size`** differ between runs; local batch is chosen so **global batch stays 16** (32K tokens/step) across configs.                                    |
+| `scripts/run_all.py`                      | For each config name, runs `torchrun --nproc_per_node=<gpus> -m torchtitan.train --job.config_file ...` with **`cwd` = `torchtitan/`**, sets **`CSV_OUTPUT=results/<name>.csv`**, and tees stdout/stderr to **`results/<name>.log`**. Flags: `--only a,b` to run a subset, `--steps N` to override training length for smoke tests. |
+| `scripts/parse_results.py`                | Reads `results/<config>.csv`, drops the first **50** steps as warmup, aggregates into **`results/summary.csv`** (throughput, peak memory, MFU, **scaling efficiency vs `single_gpu`**). Expects pandas; MFU uses a fixed parameter count and A100 BF16 peak FLOPS in-script (approximate).                                          |
+| `scripts/plot_results.py`                 | Reads `results/summary.csv` and writes **`figures/throughput.png`**, **`figures/memory.png`**, **`figures/scaling_efficiency.png`**.                                                                                                                                                                                                |
+| `scripts/make_fake_data.py`               | Generates synthetic per-step CSVs under `results/` so you can run parse/plot without GPUs or torchtitan.                                                                                                                                                                                                                            |
+| `requirements.txt` (repo root)            | Analysis dependencies only (`pandas`, `matplotlib`, `numpy`). Training stack comes from torchtitan after `setup.sh`.                                                                                                                                                                                                                |
+| `test.py`                                 | Pins the torchtitan commit hash for reference; not an automated test runner.                                                                                                                                                                                                                                                        |
+
+**Typical workflow**
+
+1. `bash setup.sh` then `source venv/bin/activate`
+2. `python scripts/run_all.py` (needs the right GPU count per config; use `--only` / `--steps` for partial runs)
+3. `python scripts/parse_results.py`
+4. `python scripts/plot_results.py`
+
+The **`torchtitan/`** directory is created by `setup.sh` and is not part of this git tree; training always launches from there so imports and relative paths (e.g. tokenizer assets) match upstream torchtitan.
 
 ## Results Summary
 
@@ -90,3 +113,20 @@ This is the most unexpected finding and worth investigating. In theory, DDP shou
 3. **NCCL algorithm differences.** DDP's single massive all-reduce may hit a less-optimized code path than FSDP's many smaller all-gathers and reduce-scatters.
 
 Any of these could dominate. For a class project, "FSDP's fine-grained overlap pattern beats DDP's coarse single-reduce at small batch sizes" is a great takeaway to discuss.
+
+---
+
+## Deep Dive: The Mechanics of FSDP Memory Savings
+
+Another interesting finding is the sheer magnitude of memory reduction when using FSDP, which drops the per-GPU memory from 22.9 GB down to 2.9 GB (an almost exact 8x reduction). This comes down to how different strategies handle the "Model State" (which includes the model's Parameters, computed Gradients, and Optimizer States):
+
+1. **DDP Replication:** DDP duplicates the entire Model State across every GPU. If the total state requires 22.9 GB, every single GPU holds that full 22.9 GB footprint, resulting in massive redundancy.
+2. **FSDP Sharding:** FSDP slices the Model State into equal pieces across the active GPUs. With 8 GPUs, the 22.9 GB state is divided by 8, resulting in ~2.86 GB per GPU (matching the observed 2.9 GB).
+
+To compute the forward and backward passes while only holding a fraction of the model, FSDP performs "just-in-time" gathering. It fetches the required shards for a specific layer from the other GPUs, computes the layer, and then immediately discards the gathered weights. This mechanism trades a small amount of communication overhead for the massive memory savings shown in the benchmark.
+
+---
+
+## Deep Dive: Why Tensor Parallelism Was So Slow Here
+
+TP shards **layers** across GPUs, so every block pays **many small collectives** on the critical path (harder to overlap than DDP/FSDP-style patterns). With dim 2048 and TP=8, per-rank GEMMs are **tiny** (~256-wide), so Tensor Cores stay underfed and the step goes **comm-bound**—low MFU matches “mostly waiting.” TP is mainly for **memory** when layers do not fit; here FSDP already suffices, so TP adds traffic without helping this small model. **Caveat:** wider models, bigger microbatches, or different stacks can amortize TP better; this is not “TP is always bad.”
