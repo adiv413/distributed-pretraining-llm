@@ -1,6 +1,7 @@
 # Distributed Pretraining LLM: Parallelism Strategies Benchmark
 
 This repository benchmarks various distributed training strategies (DDP, FSDP, Tensor Parallelism) for pretraining a small LLM (Llama 3 1.4B) across an 8-GPU node.
+Final Presentation Link: https://docs.google.com/presentation/d/1mGfGcpNcU-2aKmKW2dCXlYU1cD006ZgYewZtOqn120c/edit?usp=sharing
 
 ## Experiment Setup
 
