@@ -1,16 +1,16 @@
 # Distributed Pretraining LLM: Parallelism Strategies Benchmark
 
-This repository benchmarks various distributed training strategies (DDP, FSDP, Tensor Parallelism) for pretraining a small LLM (Llama 3 1.4B) across an 8-GPU node.
+This repository benchmarks various distributed training strategies (DDP, FSDP, tensor parallelism) for pretraining a small Llama3-style model (torchtitan flavor `1B` from the patch; scale is in the “~1B” class) on up to 8 GPUs (`single_gpu` and `tp_2` use 1 and 2 GPUs; see `scripts/run_all.py`).
 
 ## Experiment Setup
 
 - **Hardware:** 8x A100 80GB SXM (NVLink), RunPod
-- **Software:** PyTorch 2.11 / CUDA 12.8 / torchtitan v0.2.2
-- **Model:** Llama3 (1.43B params): dim=2048, 16 layers, 16 heads (GQA 8), vocab=128K
-- **Training:** seq_len=2048, bf16, AdamW, global batch=16 (32K tokens/step, fixed), 550 steps, no compile
-- **Data:** c4_test (2K samples) - systems bench only
-- **Configs:** 7 parallelism strategies, identical except for [parallelism] section and local_batch_size (adjusted so global batch stays at 16)
-- **Metrics:** Tokens/sec/GPU, peak memory, Model Flop Utilization (MFU), scaling efficiency. (Warmup: 50 steps discarded; measured over steps 50-550)
+- **Software:** The training stack is whatever `setup.sh` installs from the pinned [torchtitan](https://github.com/pytorch/torchtitan) commit; reported PyTorch / CUDA / torchtitan package versions (e.g. 2.11 / 12.8 / v0.2.2) describe the environment used for the published numbers, not a checked-in lockfile.
+- **Model:** Pinned patch adds a `1B` `TransformerModelArgs` entry: dim=2048, 16 layers, 16 heads, GQA with 8 KV heads (`n_kv_heads=8`); see `patches/csv_logging_and_1b_flavor.patch`. Vocabulary size and other defaults follow the upstream torchtitan Llama3 model definition.
+- **Training:** seq_len=2048, AdamW, global batch=16 (32,768 tokens/step, fixed) via `local_batch_size` × `seq_len` × data-parallel size; 550 steps, compile off (`[compile].enable = false` in TOML). Precision follows torchtitan defaults for that model (typically bf16; not set explicitly in our TOMLs).
+- **Data:** `c4_test` in torchtitan (small set intended for quick runs / smoke tests; exact size is defined upstream).
+- **Configs:** 7 TOML files under `configs/`. The parallel layout and `training.local_batch_size` are tuned so the global token count per step matches the single-GPU case; `job.description` also differs per file.
+- **Metrics:** tokens/sec per GPU, peak memory, model FLOP utilization (MFU), scaling efficiency vs `single_gpu`. **Warmup:** `parse_results.py` keeps rows with `step >= 50` (steps **1–49** treated as warm-up; **501** rows from **50** through **550** when a full 550-step run finishes). MFU in `parse_results.py` uses **1e9** parameters and A100 BF16 spec FLOPS as rough constants, so treat MFU as an approximate, comparable score—not a match to a new exact param count.
 
 ## Repository layout and code
 
@@ -19,11 +19,11 @@ Training is not implemented in this repo from scratch. **This repo configures [t
 | Path                                      | What it does                                                                                                                                                                                                                                                                                                                        |
 | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `setup.sh`                                | Creates a Python 3.11 `venv/`, clones `torchtitan/` at a **pinned commit** (`TORCHTITAN_COMMIT` in the script), applies `patches/csv_logging_and_1b_flavor.patch`, installs torchtitan (editable) and this repo’s `requirements.txt`. Run once on a fresh machine.                                                                  |
-| `patches/csv_logging_and_1b_flavor.patch` | Adds a **1B-scale** Llama3 `TransformerModelArgs` entry and **per-step CSV logging** in torchtitan’s trainer. When the env var **`CSV_OUTPUT`** is set, rank 0 writes one row per step: `step`, `step_time_s`, `tokens_this_step`, `peak_mem_gb`, `loss`.                                                                           |
-| `configs/*.toml`                          | One file per parallelism strategy. Sections match torchtitan’s job config: `[model]`, `[training]`, `[parallelism]`, etc. Only **`[parallelism]`** and **`training.local_batch_size`** differ between runs; local batch is chosen so **global batch stays 16** (32K tokens/step) across configs.                                    |
-| `scripts/run_all.py`                      | For each config name, runs `torchrun --nproc_per_node=<gpus> -m torchtitan.train --job.config_file ...` with **`cwd` = `torchtitan/`**, sets **`CSV_OUTPUT=results/<name>.csv`**, and tees stdout/stderr to **`results/<name>.log`**. Flags: `--only a,b` to run a subset, `--steps N` to override training length for smoke tests. |
-| `scripts/parse_results.py`                | Reads `results/<config>.csv`, drops the first **50** steps as warmup, aggregates into **`results/summary.csv`** (throughput, peak memory, MFU, **scaling efficiency vs `single_gpu`**). Expects pandas; MFU uses a fixed parameter count and A100 BF16 peak FLOPS in-script (approximate).                                          |
-| `scripts/plot_results.py`                 | Reads `results/summary.csv` and writes **`figures/throughput.png`**, **`figures/memory.png`**, **`figures/scaling_efficiency.png`**.                                                                                                                                                                                                |
+| `patches/csv_logging_and_1b_flavor.patch` | Adds a **1B-scale** Llama3 `TransformerModelArgs` entry and **per-step CSV logging** in torchtitan’s trainer. When **`CSV_OUTPUT`** is set, rank 0 writes a header once, then one row per step: `step`, `step_time_s`, `tokens_this_step`, `peak_mem_gb`, `loss` (the `loss` column is left **empty** in this patch so parsing does not depend on it). |
+| `configs/*.toml`                          | One file per strategy. **Parallelism** and **`training.local_batch_size`** differ (plus **`job.description`** strings); everything else in the shared template is aligned. `local_batch_size` is set so the **global token count per step** matches the 1-GPU baseline (32,768 tokens from batch × `seq_len` × data-parallel world).          |
+| `scripts/run_all.py`                      | For each name, runs `torchrun` (rendezvous, `--local-ranks-filter 0`, `--tee 3`, etc.) for `-m torchtitan.train` with **`cwd` = `torchtitan/`**, sets **`CSV_OUTPUT=results/<name>.csv`** and **`PYTORCH_ALLOC_CONF=expandable_segments:True`**, and **redirects combined stdout+stderr** to **`results/<name>.log`** (log file only, not a shell “tee” to your terminal). Flags: `--only a,b`, `--steps N` for partial/smoke runs. |
+| `scripts/parse_results.py`                | Reads `results/<config>.csv`, keeps rows with **`step` ≥ 50** (drops steps **1–49** as warm-up), writes **`results/summary.csv`**. **Scaling efficiency** is per-GPU throughput vs the `single_gpu` run. **MFU** uses fixed constants in the script; see Experiment Setup.                                                                          |
+| `scripts/plot_results.py`                 | Reads `results/summary.csv` and writes **`figures/throughput.png`**, **`figures/memory.png`**, **`figures/scaling_efficiency.png`**, and **`figures/mfu.png`**.                                                                                                                                                                                 |
 | `scripts/make_fake_data.py`               | Generates synthetic per-step CSVs under `results/` so you can run parse/plot without GPUs or torchtitan.                                                                                                                                                                                                                            |
 | `requirements.txt` (repo root)            | Analysis dependencies only (`pandas`, `matplotlib`, `numpy`). Training stack comes from torchtitan after `setup.sh`.                                                                                                                                                                                                                |
 | `test.py`                                 | Pins the torchtitan commit hash for reference; not an automated test runner.                                                                                                                                                                                                                                                        |
@@ -49,6 +49,8 @@ The **`torchtitan/`** directory is created by `setup.sh` and is not part of this
 | tp_2        | 2,114      | 12.0 GB    | 4.1%      | 0.10        |
 | tp_8        | 1,765      | 3.8 GB     | 3.4%      | 0.08        |
 
+Numbers are rounded to match `results/summary.csv` produced from the checked-in per-step `results/<config>.csv` logs (re-run `parse_results.py` after new experiments).
+
 ---
 
 ## Key Findings
@@ -57,7 +59,7 @@ The **`torchtitan/`** directory is created by `setup.sh` and is not part of this
 
 **2. FSDP memory savings are massive.** 22.9 GB (single GPU) -> 2.9 GB (FSDP=8) is an 8x reduction. Exactly what the theory predicts - P/G/O state sharded across 8 GPUs.
 
-**3. TP is catastrophically slow.** TP=2 gets 10% scaling efficiency; TP=8 gets 8%. This is the single most interesting finding. What's happening: your model is tiny (1B) and your per-GPU batch was only 4 sequences. The matmuls being sharded across TP ranks become microscopic (dim=2048 -> dim=256 per GPU for TP=8), way below the size where tensor cores are efficient. Every matmul is sync-comm-bound with trivial compute. MFU of 3-4% means GPUs are idle 96% of the time waiting for comm.
+**3. TP is catastrophically slow.** TP=2 gets 10% scaling efficiency; TP=8 gets 8%. The model is small (flavor `1B`), and with TP=8 the hidden size is split across 8 ranks (e.g. ~2048 → ~256 per rank for matrix work), so each per-rank GEMM is tiny compared to what tensor cores like. Collectives on the forward/backward path dominate; MFU in the 3–4% range is consistent with a communication-bound step.
 
 **4. Combined FSDP+TP is worse than pure FSDP.** Both fsdp_4_tp_2 (0.70) and fsdp_2_tp_4 (0.66) underperform pure fsdp_8 (0.85). This confirms: TP is only worth adding when you need it (model too big, activation memory too large), not for speedup. In your 1B regime, pure FSDP is the winner.
 
@@ -82,7 +84,7 @@ This is actually a common finding in systems papers: distributed training always
 This is the clearest "wow, sharding works" metric:
 
 - DDP=8 is actually worse than single-GPU (28.6 vs 22.9) - gradient buffers for all-reduce add overhead.
-- Every FSDP-containing config collapses to 2.9 GB (10x reduction).
+- Every FSDP-containing config collapses to about **2.9 GB** (roughly **8×** less than the ~23 GB single-GPU peak, matching shard count over 8 GPUs).
 - TP=2 uses 12 GB (only half the sharding of TP=8's 3.8 GB because fewer GPUs).
 
 ### Throughput
