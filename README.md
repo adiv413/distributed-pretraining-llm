@@ -1,8 +1,8 @@
 # Distributed Pretraining LLM: Parallelism Strategies Benchmark
 
-This repository benchmarks various distributed training strategies (DDP, FSDP, Tensor Parallelism) for pretraining a small LLM (Llama 3 1.4B) across an 8-GPU node.
+Analyzing Distributed training strategies (DDP, FSDP, Tensor Parallelism) for pretraining a small LLM (Llama 3 1.4B) across an 8-GPU node.
 
-Final Presentation Link: give me a question What is the Model FLOPs Utilization (MFU) penalty when moving from a single GPU to a distributed setup?
+Final Presentation Link: https://docs.google.com/presentation/d/1mGfGcpNcU-2aKmKW2dCXlYU1cD006ZgYewZtOqn120c/edit?usp=sharing
 
 Team Name: Project ML 
 
@@ -55,8 +55,8 @@ This benchmark was designed to answer the following core research questions:
 
 1. **Which parallelism strategy yields the highest throughput for a 1.4B parameter model?**
    * *Objective:* Determine the optimal configuration for small-scale LLM pretraining.
-2. **What is the Model FLOPs Utilization (MFU) penalty when moving from a single GPU to a distributed setup?**
-   * *Objective:* Quantify the overhead of distribution and communication synchronization.
+2. **How does the scaling efficiency of various parallelism strategies compare when normalized against a single-GPU MFU baseline?**
+   * *Objective:* Identify which strategy minimizes the performance gap between local and distributed execution.
 3. **Why is Tensor Parallelism (TP) inefficient for smaller models (1B–2B range)?**
    * *Objective:* Analyze the relationship between communication frequency and computational intensity.
 4. **Does FSDP’s ability to "overlap" communication and computation make it faster than DDP?**
