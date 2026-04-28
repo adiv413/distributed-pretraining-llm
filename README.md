@@ -2,9 +2,18 @@
 
 This repository benchmarks various distributed training strategies (DDP, FSDP, Tensor Parallelism) for pretraining a small LLM (Llama 3 1.4B) across an 8-GPU node.
 
-Final Presentation Link: https://docs.google.com/presentation/d/1mGfGcpNcU-2aKmKW2dCXlYU1cD006ZgYewZtOqn120c/edit?usp=sharing
+Final Presentation Link: give me a question What is the Model FLOPs Utilization (MFU) penalty when moving from a single GPU to a distributed setup?
+
+Team Name: Project ML 
 
 Team Members: Aditya Vasantharao and Kevin Mao
+
+## Goals
+The primary objective of this project is to conduct an experimental study on the efficiency and scalability of different distributed training strategies. Specifically, we aim to:
+
+* **Benchmark Throughput:** Quantify the performance (tokens/sec/GPU) of DDP, FSDP, and Tensor Parallelism (TP) when pretraining a Llama 3 1.4B model.
+* **Analyze Memory Efficiency:** Compare peak memory utilization across strategies to determine which configurations allow for larger batch sizes or models on limited hardware.
+* **Evaluate Scaling Efficiency and Trade-offs:** Measure how effectively each strategy scales across an 8-GPU node compared to a single-GPU baseline. Investigate the trade-offs between communication overhead and compute overlap of different strategies.
 
 ## Experiment Setup
 
@@ -40,6 +49,18 @@ Training is not implemented in this repo from scratch. **This repo configures [t
 4. `python scripts/plot_results.py`
 
 The **`torchtitan/`** directory is created by `setup.sh` and is not part of this git tree; training always launches from there so imports and relative paths (e.g. tokenizer assets) match upstream torchtitan.
+
+## Questions for Experimental Study
+This benchmark was designed to answer the following core research questions:
+
+1. **Which parallelism strategy yields the highest throughput for a 1.4B parameter model?**
+   * *Objective:* Determine the optimal configuration for small-scale LLM pretraining.
+2. **What is the Model FLOPs Utilization (MFU) penalty when moving from a single GPU to a distributed setup?**
+   * *Objective:* Quantify the overhead of distribution and communication synchronization.
+3. **Why is Tensor Parallelism (TP) inefficient for smaller models (1B–2B range)?**
+   * *Objective:* Analyze the relationship between communication frequency and computational intensity.
+4. **Does FSDP’s ability to "overlap" communication and computation make it faster than DDP?**
+   * *Objective:* Evaluate if advanced memory management techniques translate to actual throughput gains at this scale.
 
 ## Results Summary
 
@@ -108,7 +129,11 @@ This is the money shot:
 
 ---
 
-## Deep Dive: The Surprise of FSDP Beating DDP
+## Conclusion
+
+This benchmarking study evaluates the performance of Llama 3 1.4B across various distributed training strategies—including DDP, FSDP, and Tensor Parallelism (TP)—on an 8x NVIDIA A100 (80GB) cluster. Our results indicate that parallelism selection for models in the 1B–2B parameter range is primarily governed by the trade-off between memory sharding benefits and communication overhead.
+
+## The Surprise of FSDP Beating DDP
 
 This is the most unexpected finding and worth investigating. In theory, DDP should be faster. Possible explanations:
 
@@ -120,7 +145,7 @@ Any of these could dominate. For a class project, "FSDP's fine-grained overlap p
 
 ---
 
-## Deep Dive: The Mechanics of FSDP Memory Savings
+## The Mechanics of FSDP Memory Savings
 
 Another interesting finding is the sheer magnitude of memory reduction when using FSDP, which drops the per-GPU memory from 22.9 GB down to 2.9 GB (an almost exact 8x reduction). This comes down to how different strategies handle the "Model State" (which includes the model's Parameters, computed Gradients, and Optimizer States):
 
@@ -131,6 +156,6 @@ To compute the forward and backward passes while only holding a fraction of the 
 
 ---
 
-## Deep Dive: Why Tensor Parallelism Was So Slow Here
+## Why Tensor Parallelism Was So Slow Here
 
 TP shards **layers** across GPUs, so every block pays **many small collectives** on the critical path (harder to overlap than DDP/FSDP-style patterns). With dim 2048 and TP=8, per-rank GEMMs are **tiny** (~256-wide), so Tensor Cores stay underfed and the step goes **comm-bound**—low MFU matches “mostly waiting.” TP is mainly for **memory** when layers do not fit; here FSDP already suffices, so TP adds traffic without helping this small model. **Caveat:** wider models, bigger microbatches, or different stacks can amortize TP better; this is not “TP is always bad.”
